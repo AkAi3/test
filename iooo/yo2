@@ -1,0 +1,89 @@
+import cv2
+import pyaudio
+import speech_recognition as sr
+import threading
+
+# Initialize the recognizer
+recognizer = sr.Recognizer()
+
+# Initialize video capture
+cap = cv2.VideoCapture(0)
+
+# Check if the video capture is initialized successfully
+if not cap.isOpened():
+    print("Error: Could not open video capture.")
+    exit()
+
+# Get the default video frame width and height
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+# Define the codec and create VideoWriter object to save the video
+out = cv2.VideoWriter('output.avi', cv2.VideoWriter_fourcc(*'MJPG'), 10, (frame_width, frame_height))
+
+# Check if the VideoWriter is initialized successfully
+if not out.isOpened():
+    print("Error: Could not open VideoWriter.")
+    cap.release()
+    exit()
+
+# Initialize PyAudio
+p = pyaudio.PyAudio()
+stream = p.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=1024)
+
+# Variable to store the subtitles
+subtitle = ""
+
+# Function to capture audio and recognize speech
+def capture_audio():
+    global subtitle
+    while True:
+        with sr.Microphone() as source:
+            try:
+                audio_data = recognizer.listen(source, timeout=3)
+                text = recognizer.recognize_google(audio_data)
+                subtitle = text
+            except sr.UnknownValueError:
+                subtitle = "Could not understand audio"
+            except sr.RequestError as e:
+                subtitle = f"Could not request results; {e}"
+            except sr.WaitTimeoutError:
+                subtitle = "Listening timeout"
+
+# Start the audio capture thread
+audio_thread = threading.Thread(target=capture_audio)
+audio_thread.daemon = True
+audio_thread.start()
+
+# Main loop to capture video, overlay subtitles, and save the video
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Failed to capture frame.")
+        break
+
+    # Display subtitle on the frame
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    y0, dy = 50, 30
+    for i, line in enumerate(subtitle.split('\n')):
+        y = y0 + i * dy
+        cv2.putText(frame, line, (50, y), font, 1, (255, 255, 255), 2, cv2.LINE_AA)
+
+    # Write the frame into the file 'output.avi'
+    out.write(frame)
+
+    # Display the resulting frame
+    cv2.imshow('Live Video with Subtitles', frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# When everything is done, release the capture and close windows
+cap.release()
+out.release()
+cv2.destroyAllWindows()
+stream.stop_stream()
+stream.close()
+p.terminate()
+
+print("Video saved successfully.")

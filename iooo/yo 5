@@ -1,0 +1,155 @@
+import cv2
+import pyaudio
+import speech_recognition as sr
+import numpy as np
+import threading
+import time
+from pydub import AudioSegment
+from moviepy.editor import VideoFileClip, AudioFileClip
+
+# Initialize the recognizer
+recognizer = sr.Recognizer()
+
+# Initialize video capture
+cap = cv2.VideoCapture(0)
+
+# Check if the video capture is initialized successfully
+if not cap.isOpened():
+    print("Error: Could not open video capture.")
+    exit()
+
+# Get the default video frame width and height
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+# Define the codec and create VideoWriter object to save the video
+out = cv2.VideoWriter('output.avi', cv2.VideoWriter_fourcc(*'MJPG'), 10, (frame_width, frame_height))
+
+# Check if the VideoWriter is initialized successfully
+if not out.isOpened():
+    print("Error: Could not open VideoWriter.")
+    cap.release()
+    exit()
+
+# Initialize PyAudio
+p = pyaudio.PyAudio()
+stream = p.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=512)
+
+# Variable to store the subtitles and audio segments
+subtitle = ""
+audio_segments = []
+buffer_lock = threading.Lock()
+buffer = []
+censor_flag = False
+censor_start_time = 0
+
+# List of inappropriate words to censor
+inappropriate_words = ['good', 'bad', 'badword3']  # Add the words you want to censor
+
+# Function to censor inappropriate words
+def censor_text(text):
+    global censor_flag, censor_start_time
+    words = text.split()
+    censored_words = []
+    for word in words:
+        if word.lower() in inappropriate_words:
+            censored_words.append('*' * len(word))
+            censor_flag = True
+            censor_start_time = time.time()
+        else:
+            censored_words.append(word)
+    return ' '.join(censored_words)
+
+# Function to capture audio and recognize speech
+def capture_audio():
+    global subtitle, buffer, censor_flag
+    while True:
+        with sr.Microphone() as source:
+            try:
+                audio_data = recognizer.listen(source, timeout=3)
+                text = recognizer.recognize_google(audio_data)
+                subtitle = censor_text(text)
+
+                # Convert audio_data to AudioSegment
+                raw_data = audio_data.get_raw_data()
+                temp_audio = AudioSegment(
+                    data=raw_data,
+                    sample_width=2,
+                    frame_rate=44100,
+                    channels=1
+                )
+
+                # Check for inappropriate words and mute if found
+                if censor_flag:
+                    muted_segment = AudioSegment.silent(duration=len(temp_audio))
+                    with buffer_lock:
+                        buffer.append(muted_segment)
+                else:
+                    with buffer_lock:
+                        buffer.append(temp_audio)
+            except sr.UnknownValueError:
+                subtitle = "Could not understand audio"
+            except sr.RequestError as e:
+                subtitle = f"Could not request results; {e}"
+            except sr.WaitTimeoutError:
+                subtitle = "Listening timeout"
+
+# Start the audio capture thread
+audio_thread = threading.Thread(target=capture_audio)
+audio_thread.daemon = True
+audio_thread.start()
+
+# Main loop to capture video, overlay subtitles, and save the video
+prev_subtitle = ""
+subtitle_display_time = 0
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Failed to capture frame.")
+        break
+
+    # Check if we need to display a censor bar
+    if censor_flag and (time.time() - censor_start_time < 1):
+        # Display a black rectangle to censor the video
+        frame = cv2.rectangle(frame, (0, frame_height // 2 - 50), (frame_width, frame_height // 2 + 50), (0, 0, 0), -1)
+    else:
+        censor_flag = False
+
+    # Display subtitle on the frame only if it has changed or the duration has not expired
+    if subtitle != prev_subtitle or (time.time() - subtitle_display_time < 1):
+        prev_subtitle = subtitle
+        subtitle_display_time = time.time()
+        frame = cv2.putText(frame, subtitle, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+
+    # Write the frame into the file 'output.avi'
+    out.write(frame)
+
+    # Display the resulting frame
+    cv2.imshow('Live Video with Subtitles', frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# When everything is done, release the capture and close windows
+cap.release()
+out.release()
+cv2.destroyAllWindows()
+stream.stop_stream()
+stream.close()
+p.terminate()
+
+# Combine the audio segments into one
+with buffer_lock:
+    final_audio = sum(buffer)
+
+# Save the final audio segment
+final_audio.export("output_audio.wav", format="wav")
+
+# Combine the video and audio using moviepy
+video_clip = VideoFileClip("output.avi")
+audio_clip = AudioFileClip("output_audio.wav")
+
+final_clip = video_clip.set_audio(audio_clip)
+final_clip.write_videofile("final_output.mp4", codec="libx264")
+
+print("Video saved successfully.")
